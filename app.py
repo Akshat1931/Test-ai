@@ -18,9 +18,15 @@ def query(payload):
         return result.get("error", "Sorry, something went wrong.")
 
 def chat_with_model(message, history=[]):
+    # Add the new message format
+    history.append({"role": "user", "content": message})
     prompt = message
     reply = query({"inputs": prompt})
-    history.append((message, reply))
+    
+    # Append assistant's reply using the new format
+    history.append({"role": "assistant", "content": reply})
+    
     return history, history
 
-gr.ChatInterface(chat_with_model, title="My Free AI Chatbot 💬").launch()
+# Now using the new 'messages' format in Gradio's ChatInterface
+gr.ChatInterface(fn=chat_with_model, title="My Free AI Chatbot 💬").launch(share=True)
