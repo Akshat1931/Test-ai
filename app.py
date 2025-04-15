@@ -4,9 +4,8 @@ import os
 import json
 from typing import List, Dict, Any
 
-# Configuration
-# Using Flan-T5-XL which is advanced yet compatible with free tier
-API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-xl"
+# Configuration - Using Flan-T5-Base which is smaller but still good for educational purposes
+API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-base"
 
 def get_token():
     return os.getenv('HF_TOKEN')
@@ -36,11 +35,11 @@ def query(message, history: List[Dict[str, str]] = None):
     payload = {
         "inputs": prompt,
         "parameters": {
-            "max_new_tokens": 250,
+            "max_new_tokens": 200,
             "temperature": 0.7,
             "top_p": 0.95,
             "do_sample": True,
-            "return_full_text": False  # We don't want the prompt repeated back
+            "return_full_text": False
         }
     }
     
@@ -115,4 +114,5 @@ with gr.Blocks(css="footer {visibility: hidden}") as demo:
     gr.Code(value=iframe_code, language="html")
 
 if __name__ == "__main__":
-    demo.launch()
+    # Adding share=True to create a public link
+    demo.launch(share=True)
