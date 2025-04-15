@@ -2,72 +2,117 @@ import gradio as gr
 import requests
 import os
 import json
+from typing import List, Dict, Any
 
-# Hugging Face API configuration
-API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.1"
-headers = {
-    "Authorization": f"Bearer {os.getenv('HF_TOKEN')}"
-}
+# Configuration
+# Using Flan-T5-XL which is advanced yet compatible with free tier
+API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-xl"
 
-def query(payload):
+def get_token():
+    return os.getenv('HF_TOKEN')
+
+def query(message, history: List[Dict[str, str]] = None):
+    token = get_token()
+    if not token:
+        return "Error: API token not configured. Please contact the administrator."
+    
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    # Create a context from history to give the model more context
+    context = ""
+    if history and len(history) > 0:
+        # Format last few exchanges to provide context
+        context_entries = history[-3:] if len(history) > 3 else history
+        for entry in context_entries:
+            if "role" in entry and "content" in entry:
+                if entry["role"] == "user":
+                    context += f"Question: {entry['content']}\n"
+                else:
+                    context += f"Answer: {entry['content']}\n"
+    
+    # Format an educational-focused prompt
+    prompt = f"{context}Question: {message}\nAnswer:"
+    
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "max_new_tokens": 250,
+            "temperature": 0.7,
+            "top_p": 0.95,
+            "do_sample": True,
+            "return_full_text": False  # We don't want the prompt repeated back
+        }
+    }
+    
     try:
-        # Make sure the payload is formatted correctly for this specific model
         response = requests.post(API_URL, headers=headers, json=payload)
-        response.raise_for_status()  # Raise exception for HTTP errors
+        response.raise_for_status()
         
         result = response.json()
         
-        # Debug the raw response if needed
-        # print("Raw response:", result)
-        
-        # Handle different response formats
         if isinstance(result, list) and len(result) > 0:
             if "generated_text" in result[0]:
-                return result[0]["generated_text"]
+                return result[0]["generated_text"].strip()
             else:
                 return str(result[0])
         else:
             return str(result)
     except requests.exceptions.HTTPError as e:
-        error_text = f"HTTP Error: {e}"
+        error_text = f"Error: Unable to generate response. Please try again later."
+        print(f"HTTP Error: {e}")
         try:
             error_details = response.json()
-            error_text += f"\nDetails: {json.dumps(error_details)}"
+            print(f"Details: {json.dumps(error_details)}")
         except:
             pass
         return error_text
     except Exception as e:
-        return f"Error: {str(e)}"
+        print(f"Error: {str(e)}")
+        return "Sorry, there was a problem generating a response. Please try again."
 
 def chat_with_model(message, history):
-    # The expected payload format for Mistral-7B-Instruct
-    payload = {
-        "inputs": message,
-        "parameters": {
-            "max_new_tokens": 150,
-            "temperature": 0.7,
-            "top_p": 0.9,
-            "do_sample": True
-        }
-    }
+    # Convert history to our format for context
+    formatted_history = []
+    for i in range(0, len(history), 2):
+        if i < len(history):
+            formatted_history.append({"role": "user", "content": history[i]})
+        if i+1 < len(history):
+            formatted_history.append({"role": "assistant", "content": history[i+1]})
     
-    response = query(payload)
-    
-    # If the response includes the original prompt, strip it out
-    if response and response.startswith(message):
-        response = response[len(message):].strip()
-        
+    # Get response including context from previous exchanges
+    response = query(message, formatted_history)
     return response
 
-# Create and launch the Gradio interface
-demo = gr.ChatInterface(
-    fn=chat_with_model,
-    title="Mistral-7B Chat",
-    description="Chat with Mistral-7B-Instruct using Hugging Face API",
-    examples=["Tell me a short story", "What are the benefits of exercise?"],
-    cache_examples=False
-)
+# Create a customized interface for educational purposes
+with gr.Blocks(css="footer {visibility: hidden}") as demo:
+    gr.Markdown("# Educational AI Assistant")
+    gr.Markdown("Ask questions about any subject to get detailed, educational responses.")
+    
+    chatbot = gr.ChatInterface(
+        fn=chat_with_model,
+        examples=[
+            "Explain photosynthesis in simple terms",
+            "What are the key events of World War II?",
+            "How do I solve quadratic equations?",
+            "What is the difference between metaphor and simile?",
+            "Explain the basics of machine learning"
+        ],
+        title="Study Assistant",
+        theme="soft"
+    )
+    
+    gr.Markdown("### Embed this chatbot in your website")
+    gr.Markdown("Use the following HTML code to embed this chatbot in your website:")
+    
+    iframe_code = f"""
+    <iframe
+        src="{os.getenv('SPACE_URL', 'YOUR_HUGGING_FACE_SPACE_URL')}"
+        width="100%"
+        height="600px"
+        style="border: 1px solid #ddd; border-radius: 8px;"
+    ></iframe>
+    """
+    gr.Code(value=iframe_code, language="html")
 
-# For Hugging Face Spaces
 if __name__ == "__main__":
     demo.launch()
