@@ -188,12 +188,13 @@ def chat_with_model(message, history):
     response = query(message, flat_history)
     return response
 
-# Create a more sophisticated UI with better user experience
+# Create a custom chat interface using Blocks instead of ChatInterface
+# to ensure compatibility with older Gradio versions
 with gr.Blocks(css="""
     footer {visibility: hidden}
     .gradio-container {max-width: 850px; margin: auto;}
-    .assistant-message {background-color: #f0f7ff; border-radius: 12px; padding: 12px;}
-    .user-message {background-color: #f5f5f5; border-radius: 12px; padding: 12px;}
+    .message-bubble.user {background-color: #f9f9f9; border-radius: 10px; padding: 10px;}
+    .message-bubble.bot {background-color: #f0f7ff; border-radius: 10px; padding: 10px;}
 """) as demo:
     with gr.Row():
         gr.Markdown("""
@@ -203,9 +204,20 @@ with gr.Blocks(css="""
         This assistant provides high-quality educational answers while staying within resource constraints.
         """)
     
-    # Main chat interface
-    chatbot = gr.ChatInterface(
-        fn=chat_with_model,
+    # Create a custom chat interface using Chat and other components
+    chatbot = gr.Chatbot(label="Conversation", elem_classes="chatbot")
+    msg = gr.Textbox(
+        placeholder="Ask me any educational question...",
+        show_label=False,
+        container=False
+    )
+    
+    with gr.Row():
+        submit_btn = gr.Button("Submit", variant="primary")
+        clear_btn = gr.Button("Clear")
+    
+    # Add examples
+    gr.Examples(
         examples=[
             "Explain quantum entanglement in terms a high school student could understand",
             "What are three different approaches to solving the traveling salesman problem?",
@@ -213,12 +225,35 @@ with gr.Blocks(css="""
             "What are the most effective teaching methods according to recent research?",
             "Write a short poem about mathematics that includes metaphors related to exploration"
         ],
-        title="Study Assistant Pro",
-        retry_btn=gr.Button("♻️ Regenerate"),
-        undo_btn=gr.Button("↩️ Undo"),
-        clear_btn=gr.Button("🗑️ Clear Chat"),
-        theme="soft"
+        inputs=msg
     )
+    
+    # Define the chat functionality
+    def respond(message, chat_history):
+        if message.strip() == "":
+            return chat_history
+        
+        # Show typing indicator by appending user message immediately
+        chat_history.append((message, "..."))
+        yield chat_history
+        
+        # Get AI response
+        bot_message = chat_with_model(message, chat_history[:-1])
+        
+        # Update with actual response
+        chat_history[-1] = (message, bot_message)
+        yield chat_history
+    
+    # Connect components
+    msg.submit(respond, [msg, chatbot], [chatbot], queue=True).then(
+        lambda: "", None, [msg], queue=False
+    )
+    
+    submit_btn.click(respond, [msg, chatbot], [chatbot], queue=True).then(
+        lambda: "", None, [msg], queue=False
+    )
+    
+    clear_btn.click(lambda: [], None, [chatbot], queue=False)
     
     with gr.Accordion("Advanced Settings & Information", open=False):
         with gr.Tabs():
@@ -294,7 +329,6 @@ with gr.Blocks(css="""
         - Be specific in your questions
         - For complex topics, break them into smaller questions
         - For code examples, specify the programming language
-        - Use the 'Regenerate' button if you're not satisfied with a response
         - Try the example questions to see the capabilities
         """)
 
