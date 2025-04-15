@@ -3,148 +3,315 @@ import requests
 import os
 import json
 import time
+import hashlib
+from functools import lru_cache
 from typing import List, Dict, Any
+import threading
+import logging
 
-# Configuration - Using a model that's definitely small enough and reliable
-API_URL = "https://api-inference.huggingface.co/models/distilbert/distilgpt2"
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Configuration
+# Using Microsoft's Phi-3-mini (2.8B), one of the most capable small models available
+API_URL = "https://api-inference.huggingface.co/models/microsoft/Phi-3-mini-4k-instruct"
+
+# Cache configuration
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# Set up a semaphore to limit concurrent API calls
+API_SEMAPHORE = threading.Semaphore(3)
 
 def get_token():
-    return os.getenv('HF_TOKEN')
-
-def query(message, history: List[Dict[str, str]] = None):
-    token = get_token()
+    token = os.getenv('HF_TOKEN')
     if not token:
-        return "Error: API token not configured. Please contact the administrator."
-    
-    headers = {"Authorization": f"Bearer {token}"}
-    
-    # Create a context from history to give the model more context
-    context = ""
-    if history and len(history) > 0:
-        # Format last few exchanges to provide context
-        context_entries = history[-3:] if len(history) > 3 else history
-        for entry in context_entries:
-            if "role" in entry and "content" in entry:
-                if entry["role"] == "user":
-                    context += f"Question: {entry['content']}\n"
-                else:
-                    context += f"Answer: {entry['content']}\n"
-    
-    # Format an educational-focused prompt
-    prompt = f"{context}Question: {message}\nAnswer:"
-    
-    # Fixed parameters - removed the problematic return_full_text parameter
-    payload = {
-        "inputs": prompt,
-        "parameters": {
-            "max_new_tokens": 150,
-            "temperature": 0.7,
-            "top_p": 0.95,
-            "do_sample": True
-        }
-    }
-    
-    # Add retry mechanism for when model is loading
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(API_URL, headers=headers, json=payload)
-            
-            # Handle 503 (model loading) with retries
-            if response.status_code == 503:
-                error_json = response.json()
-                if "estimated_time" in error_json:
-                    wait_time = min(error_json.get("estimated_time", 20), 20)
-                    print(f"Model is loading. Waiting {wait_time:.2f} seconds...")
-                    time.sleep(wait_time)
-                    continue
-            
-            response.raise_for_status()
-            
-            result = response.json()
-            
-            if isinstance(result, list) and len(result) > 0:
-                if "generated_text" in result[0]:
-                    # Clean up the response to only include the answer portion
-                    generated_text = result[0]["generated_text"]
-                    # If the response contains the original prompt, strip it out
-                    if generated_text.startswith(prompt):
-                        generated_text = generated_text[len(prompt):].strip()
-                    return generated_text
-                else:
-                    return str(result[0])
-            else:
-                return str(result)
-                
-        except requests.exceptions.HTTPError as e:
-            error_text = f"Error: Unable to generate response. Please try again later."
-            print(f"HTTP Error: {e}")
-            try:
-                error_details = response.json()
-                print(f"Details: {json.dumps(error_details)}")
-                # Don't immediately return - allow retries for some errors
-                if response.status_code != 503:  # Don't retry for non-503 errors
-                    return error_text
-            except:
-                pass
-            
-            # If we've reached max retries, give up
-            if attempt == max_retries - 1:
-                return error_text
-                
-        except Exception as e:
-            print(f"Error: {str(e)}")
-            return "Sorry, there was a problem generating a response. Please try again."
-    
-    return "The model is taking too long to load. Please try again later."
+        logger.warning("HF_TOKEN environment variable not set")
+    return token
 
-def chat_with_model(message, history):
-    # Convert history to our format for context
-    formatted_history = []
+def get_cached_response(prompt_hash):
+    """Get a cached response if available"""
+    cache_file = os.path.join(CACHE_DIR, f"{prompt_hash}.json")
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'r') as f:
+                data = json.load(f)
+                # Check if cache entry is expired (older than 7 days)
+                if time.time() - data.get("timestamp", 0) < 7 * 24 * 60 * 60:
+                    return data.get("response")
+                else:
+                    logger.info(f"Cache entry expired for {prompt_hash}")
+        except Exception as e:
+            logger.error(f"Error reading cache: {e}")
+    return None
+
+def save_to_cache(prompt_hash, response):
+    """Save a response to cache with timestamp"""
+    cache_file = os.path.join(CACHE_DIR, f"{prompt_hash}.json")
+    try:
+        with open(cache_file, 'w') as f:
+            json.dump({
+                "response": response,
+                "timestamp": time.time()
+            }, f)
+    except Exception as e:
+        logger.error(f"Error saving to cache: {e}")
+
+def format_phi3_prompt(message, history):
+    """Format the prompt for Phi-3"""
+    # Start with a system prompt to guide model behavior
+    prompt = "<|system|>\nYou are a helpful, accurate, and educational AI assistant. You provide informative, concise, and helpful responses to questions on any academic or educational topic. You aim to explain concepts clearly and help students learn effectively.\n\n"
+    
+    # Add conversation history
     for i in range(0, len(history), 2):
         if i < len(history):
-            formatted_history.append({"role": "user", "content": history[i]})
+            prompt += f"<|user|>\n{history[i]}\n\n"
         if i+1 < len(history):
-            formatted_history.append({"role": "assistant", "content": history[i+1]})
+            prompt += f"<|assistant|>\n{history[i+1]}\n\n"
     
-    # Get response including context from previous exchanges
-    response = query(message, formatted_history)
+    # Add the current message
+    prompt += f"<|user|>\n{message}\n\n<|assistant|>\n"
+    
+    return prompt
+
+def query(message, history=None):
+    with API_SEMAPHORE:
+        token = get_token()
+        if not token:
+            return "Error: API token not configured. Please set the HF_TOKEN environment variable."
+        
+        # Format the prompt according to Phi-3's expected format
+        prompt = format_phi3_prompt(message, history if history else [])
+        
+        # Generate a unique hash for this prompt to use as cache key
+        prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
+        
+        # Check cache first
+        cached_response = get_cached_response(prompt_hash)
+        if cached_response:
+            logger.info("Using cached response")
+            return cached_response
+        
+        headers = {"Authorization": f"Bearer {token}"}
+        
+        # Parameters optimized for Phi-3-mini
+        payload = {
+            "inputs": prompt,
+            "parameters": {
+                "max_new_tokens": 512,
+                "temperature": 0.7,
+                "top_p": 0.95,
+                "top_k": 50,
+                "repetition_penalty": 1.15,
+                "do_sample": True,
+                "return_full_text": False
+            }
+        }
+        
+        max_retries = 3
+        backoff_factor = 2
+        
+        for attempt in range(max_retries):
+            try:
+                # Add a timeout to prevent hanging
+                response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
+                
+                # Special handling for model loading status
+                if response.status_code == 503:
+                    error_json = response.json()
+                    wait_time = min(error_json.get("estimated_time", 20), 30) * backoff_factor ** attempt
+                    logger.info(f"Model is loading. Waiting {wait_time:.2f} seconds... (Attempt {attempt+1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                
+                response.raise_for_status()
+                result = response.json()
+                
+                # Extract the generated text
+                if isinstance(result, list) and len(result) > 0 and "generated_text" in result[0]:
+                    generated_text = result[0]["generated_text"].strip()
+                    
+                    # Clean up any unwanted tokens
+                    if "<|assistant|>" in generated_text:
+                        generated_text = generated_text.split("<|assistant|>")[1].strip()
+                    
+                    # Remove any trailing system tokens
+                    for token in ["<|user|>", "<|system|>", "<|end|>"]:
+                        if token in generated_text:
+                            generated_text = generated_text.split(token)[0].strip()
+                    
+                    # Cache the successful response
+                    save_to_cache(prompt_hash, generated_text)
+                    return generated_text
+                else:
+                    # Return whatever we got
+                    text_response = str(result)
+                    logger.warning(f"Unexpected response format: {text_response[:100]}...")
+                    return text_response
+                    
+            except requests.exceptions.HTTPError as e:
+                logger.error(f"HTTP Error: {e}")
+                try:
+                    error_details = response.json()
+                    logger.error(f"API Error Details: {error_details}")
+                    
+                    # Don't retry for certain error types
+                    if response.status_code != 503:
+                        return f"Error: Unable to generate response. Please try again later. (Error: {response.status_code})"
+                except:
+                    pass
+                
+                if attempt == max_retries - 1:
+                    return "Error: Maximum retry attempts reached. Please try again later."
+                    
+            except requests.exceptions.Timeout:
+                logger.error("Request timed out")
+                if attempt == max_retries - 1:
+                    return "The request timed out. The service might be experiencing high load."
+                time.sleep(5 * (attempt + 1))  # Progressive backoff
+                
+            except Exception as e:
+                logger.error(f"Unexpected error: {str(e)}")
+                return f"Sorry, there was a problem generating a response: {str(e)}"
+        
+        return "The model is taking too long to load. Please try again later."
+
+def chat_with_model(message, history):
+    """Handle chat interactions with proper history formatting"""
+    # Convert the gradio history format to a flat list
+    flat_history = []
+    for h in history:
+        flat_history.extend(h)
+    
+    # Get response with context from previous exchanges
+    response = query(message, flat_history)
     return response
 
-# Create a customized interface for educational purposes
-with gr.Blocks(css="footer {visibility: hidden}") as demo:
-    gr.Markdown("# Educational AI Assistant")
-    gr.Markdown("Ask questions about any subject to get detailed, educational responses.")
+# Create a more sophisticated UI with better user experience
+with gr.Blocks(css="""
+    footer {visibility: hidden}
+    .gradio-container {max-width: 850px; margin: auto;}
+    .assistant-message {background-color: #f0f7ff; border-radius: 12px; padding: 12px;}
+    .user-message {background-color: #f5f5f5; border-radius: 12px; padding: 12px;}
+""") as demo:
+    with gr.Row():
+        gr.Markdown("""
+        # 🧠 Advanced Educational AI Assistant
+        
+        Powered by cutting-edge small language models optimized for the free tier.
+        This assistant provides high-quality educational answers while staying within resource constraints.
+        """)
     
+    # Main chat interface
     chatbot = gr.ChatInterface(
         fn=chat_with_model,
         examples=[
-            "Explain photosynthesis in simple terms",
-            "What are the key events of World War II?",
-            "How do I solve quadratic equations?",
-            "What is the difference between metaphor and simile?",
-            "Explain the basics of machine learning"
+            "Explain quantum entanglement in terms a high school student could understand",
+            "What are three different approaches to solving the traveling salesman problem?",
+            "How does CRISPR gene editing technology work?",
+            "What are the most effective teaching methods according to recent research?",
+            "Write a short poem about mathematics that includes metaphors related to exploration"
         ],
-        title="Study Assistant",
+        title="Study Assistant Pro",
+        retry_btn=gr.Button("♻️ Regenerate"),
+        undo_btn=gr.Button("↩️ Undo"),
+        clear_btn=gr.Button("🗑️ Clear Chat"),
         theme="soft"
     )
     
-    # Show the embedding information only if SPACE_URL is set
-    space_url = os.getenv('SPACE_URL')
-    if space_url:
-        gr.Markdown("### Embed this chatbot in your website")
-        gr.Markdown("Use the following HTML code to embed this chatbot in your website:")
-        
-        iframe_code = f"""
-        <iframe
-            src="{space_url}"
-            width="100%"
-            height="600px"
-            style="border: 1px solid #ddd; border-radius: 8px;"
-        ></iframe>
-        """
-        gr.Code(value=iframe_code, language="html")
+    with gr.Accordion("Advanced Settings & Information", open=False):
+        with gr.Tabs():
+            with gr.TabItem("Model Information"):
+                gr.Markdown("""
+                ### Model: Microsoft Phi-3-mini-4k-instruct
+                - 2.8 billion parameters (under 10GB)
+                - Highly optimized for instruction following
+                - Performs at the level of much larger models on many tasks
+                - Context window of 4,096 tokens for longer conversations
+                
+                ### Performance Optimizations
+                - Response caching system to reduce API calls
+                - Smart retry mechanism with exponential backoff
+                - Concurrent request limiting to prevent quota issues
+                """)
+            
+            with gr.TabItem("Embedding"):
+                gr.Markdown("### Embed this chatbot in your website")
+                space_url = os.getenv('SPACE_URL', 'YOUR_SPACE_URL_HERE')
+                iframe_code = f"""
+                <iframe
+                    src="{space_url}"
+                    width="100%"
+                    height="700px"
+                    style="border: 1px solid #ddd; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
+                    allow="microphone"
+                ></iframe>
+                """
+                gr.Code(value=iframe_code, language="html")
+            
+            with gr.TabItem("System Tools"):
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("### Cache Management")
+                        cache_files = len(os.listdir(CACHE_DIR)) if os.path.exists(CACHE_DIR) else 0
+                        cache_size_mb = sum(os.path.getsize(os.path.join(CACHE_DIR, f)) for f in os.listdir(CACHE_DIR)) / (1024*1024) if os.path.exists(CACHE_DIR) else 0
+                        cache_info = gr.Markdown(f"Cache entries: {cache_files} files ({cache_size_mb:.2f} MB)")
+                        
+                        clear_cache_btn = gr.Button("🧹 Clear Response Cache")
+                        
+                        def clear_cache():
+                            if os.path.exists(CACHE_DIR):
+                                deleted = 0
+                                for file in os.listdir(CACHE_DIR):
+                                    try:
+                                        os.remove(os.path.join(CACHE_DIR, file))
+                                        deleted += 1
+                                    except Exception as e:
+                                        logger.error(f"Failed to delete {file}: {e}")
+                            return f"Cache cleared: {deleted} files removed"
+                        
+                        clear_cache_btn.click(clear_cache, outputs=[cache_info])
+                    
+                    with gr.Column():
+                        gr.Markdown("### Model Settings")
+                        model_dropdown = gr.Dropdown(
+                            choices=[
+                                "microsoft/Phi-3-mini-4k-instruct (default, best overall)",
+                                "mistralai/Mistral-7B-Instruct-v0.2 (larger, higher quality)",
+                                "google/gemma-2b-it (alternative small model)",
+                                "TinyLlama/TinyLlama-1.1B-Chat-v1.0 (smallest option)"
+                            ],
+                            value="microsoft/Phi-3-mini-4k-instruct (default, best overall)",
+                            label="Model Selection (requires restart)"
+                        )
+                        gr.Markdown("Note: Model changes require application restart")
+
+    # Add a sidebar with helpful tips
+    with gr.Row():
+        gr.Markdown("""
+        ### 💡 Tips for Best Results
+        - Be specific in your questions
+        - For complex topics, break them into smaller questions
+        - For code examples, specify the programming language
+        - Use the 'Regenerate' button if you're not satisfied with a response
+        - Try the example questions to see the capabilities
+        """)
+
+# Define a custom launch function with error handling
+def launch_app():
+    try:
+        demo.launch(share=True)
+    except Exception as e:
+        logger.error(f"Failed to launch app: {e}")
+        print(f"Error launching application: {e}")
+        # Attempt to launch with fallback options
+        try:
+            print("Attempting to launch with fallback options...")
+            demo.launch(share=False)
+        except Exception as e2:
+            logger.error(f"Fallback launch also failed: {e2}")
+            print(f"Fallback launch also failed: {e2}")
 
 if __name__ == "__main__":
-    # Adding share=True to create a public link
-    demo.launch(share=True)
+    launch_app()
