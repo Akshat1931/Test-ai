@@ -99,7 +99,7 @@ def query(message, history=None):
         payload = {
             "inputs": prompt,
             "parameters": {
-                "max_new_tokens": 512,
+                "max_new_tokens": 2048,
                 "temperature": 0.7,
                 "top_p": 0.95,
                 "top_k": 50,
