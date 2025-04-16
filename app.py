@@ -25,7 +25,7 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 API_SEMAPHORE = threading.Semaphore(3)
 
 def get_token():
-    token = os.getenv('HF_TOKEN')
+    token = os.getenv('HF_TOKEN')  # Make sure this matches your Render secret name
     if not token:
         logger.warning("HF_TOKEN environment variable not set")
     return token
@@ -205,7 +205,7 @@ with gr.Blocks(css="""
         """)
     
     # Create a custom chat interface using Chat and other components
-    chatbot = gr.Chatbot(label="Conversation", elem_classes="chatbot")
+    chatbot = gr.Chatbot(label="Conversation", elem_classes="chatbot", type='messages')
     msg = gr.Textbox(
         placeholder="Ask me any educational question...",
         show_label=False,
@@ -332,20 +332,17 @@ with gr.Blocks(css="""
         - Try the example questions to see the capabilities
         """)
 
-# Define a custom launch function with error handling
-def launch_app():
+# Get port from environment variable for Render compatibility
+port = int(os.environ.get("PORT", 7860))
+
+# Log startup information
+logger.info(f"Starting application on port {port}")
+logger.info(f"HF_TOKEN configured: {'Yes' if get_token() else 'No'}")
+
+if __name__ == "__main__":
     try:
-        demo.launch(share=True)
+        # For Render deployment - bind to 0.0.0.0 with the PORT env variable
+        demo.launch(server_name="0.0.0.0", server_port=port, share=False)
     except Exception as e:
         logger.error(f"Failed to launch app: {e}")
         print(f"Error launching application: {e}")
-        # Attempt to launch with fallback options
-        try:
-            print("Attempting to launch with fallback options...")
-            demo.launch(share=False)
-        except Exception as e2:
-            logger.error(f"Fallback launch also failed: {e2}")
-            print(f"Fallback launch also failed: {e2}")
-
-if __name__ == "__main__":
-    launch_app()
