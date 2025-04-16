@@ -179,10 +179,22 @@ def query(message, history=None):
 
 def chat_with_model(message, history):
     """Handle chat interactions with proper history formatting"""
-    # Convert the gradio history format to a flat list
+    # Convert the history to the expected format
     flat_history = []
-    for h in history:
-        flat_history.extend(h)
+    if isinstance(history, list):
+        if len(history) > 0:
+            if isinstance(history[0], dict):
+                # New format with dictionaries
+                for msg in history:
+                    flat_history.append(msg["content"])
+            elif isinstance(history[0], tuple):
+                # Old format with tuples
+                for h in history:
+                    if isinstance(h, tuple) and len(h) == 2:
+                        flat_history.extend(h)
+            elif isinstance(history[0], str):
+                # Already flat list
+                flat_history = history
     
     # Get response with context from previous exchanges
     response = query(message, flat_history)
@@ -205,7 +217,13 @@ with gr.Blocks(css="""
         """)
     
     # Create a custom chat interface using Chat and other components
-    chatbot = gr.Chatbot(label="Conversation", elem_classes="chatbot", type='messages')
+    # Use tuples format instead of messages to avoid compatibility issues
+    chatbot = gr.Chatbot(
+        label="Conversation", 
+        elem_classes="chatbot",
+        height=500
+    )
+    
     msg = gr.Textbox(
         placeholder="Ask me any educational question...",
         show_label=False,
